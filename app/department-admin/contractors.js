@@ -1,9 +1,6 @@
 import { useState, useEffect } from 'react';
 import { View, Text, StyleSheet, ScrollView, TouchableOpacity, Alert, RefreshControl, Modal, TextInput } from 'react-native';
-import { 
-  ArrowLeft, Users, Star, Phone, Mail, MapPin, Award, Activity, 
-  TrendingUp, CheckCircle, X, MessageSquare, Eye
-} from 'lucide-react-native';
+import { ArrowLeft, Users, Star, Phone, Mail, MapPin, Award, Activity, TrendingUp, CircleCheck as CheckCircle, X, MessageSquare, Eye } from 'lucide-react-native';
 import { useRouter } from 'expo-router';
 import { supabase, getCurrentUser, getUserProfile } from '../../lib/supabase';
 

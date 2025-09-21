@@ -1,9 +1,6 @@
 import { useState, useEffect } from 'react';
 import { View, Text, StyleSheet, ScrollView, TouchableOpacity, Alert, RefreshControl, Modal, TextInput, Image } from 'react-native';
-import { 
-  ArrowLeft, Activity, CheckCircle, X, Eye, Calendar, User, 
-  FileText, Camera, MapPin, Clock, Award, TrendingUp
-} from 'lucide-react-native';
+import { ArrowLeft, Activity, CircleCheck as CheckCircle, X, Eye, Calendar, User, FileText, Camera, MapPin, Clock, Award, TrendingUp } from 'lucide-react-native';
 import { useRouter } from 'expo-router';
 import { 
   getTendersByDepartment,
