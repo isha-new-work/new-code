@@ -1,9 +1,10 @@
 import { useState, useEffect } from 'react';
-import { View, Text, StyleSheet, ScrollView, TouchableOpacity, TextInput, Alert, RefreshControl } from 'react-native';
+import { View, Text, StyleSheet, ScrollView, TouchableOpacity, TextInput, Alert, RefreshControl, Modal, Image } from 'react-native';
 import { useRouter } from 'expo-router';
 import { 
   FileText, DollarSign, Clock, CircleCheck as CheckCircle, TriangleAlert as AlertTriangle, 
-  Search, Plus, Settings, LogOut, MapPin, Calendar, User, Building, Award, TrendingUp
+  Search, Plus, Settings, LogOut, MapPin, Calendar, User, Building, Award, TrendingUp,
+  Activity, X, Camera, Upload, Users
 } from 'lucide-react-native';
 import { 
   getCurrentUser, 
@@ -11,8 +12,14 @@ import {
   getTenders, 
   getUserBids, 
   createBid, 
-  signOut 
+  signOut,
+  getContractorTenders,
+  createWorkProgress,
+  getWorkProgressByTender,
+  startWork
 } from '../lib/supabase';
+import * as ImagePicker from 'expo-image-picker';
+import { uploadMultipleImages } from '../lib/cloudinary';
 
 export default function TenderDashboard() {
   const router = useRouter();
@@ -27,10 +34,23 @@ export default function TenderDashboard() {
   const [bidDetails, setBidDetails] = useState('');
   const [tenders, setTenders] = useState([]);
   const [userBids, setUserBids] = useState([]);
+  const [contractorTenders, setContractorTenders] = useState([]);
+  const [showWorkModal, setShowWorkModal] = useState(false);
+  const [selectedTenderForWork, setSelectedTenderForWork] = useState(null);
+  const [workData, setWorkData] = useState({
+    title: '',
+    description: '',
+    progressPercentage: 100,
+    images: []
+  });
+  const [submittingWork, setSubmittingWork] = useState(false);
+  const [selectedImages, setSelectedImages] = useState([]);
   const [stats, setStats] = useState({
     availableTenders: 0,
     activeBids: 0,
     wonContracts: 0,
+    activeProjects: 0,
+    completedProjects: 0,
     totalEarnings: 0,
     completionRate: 0,
     avgBidValue: 0,
@@ -74,53 +94,31 @@ export default function TenderDashboard() {
     try {
       setLoading(true);
       
-      // Get all available tenders (including department-created ones)
-      const { data: allTenders, error: tendersError } = await supabase
-        .from('tenders')
-        .select(`
-          *,
-          posted_by_profile:posted_by (
-            full_name,
-            user_type
-          ),
-          department:department_id (
-            name,
-            category
-          ),
-          source_issue:source_issue_id (
-            title,
-            category,
-            location_name
-          ),
-          bids:bids (
-            id,
-            amount,
-            user_id,
-            status
-          )
-        `)
-        .order('created_at', { ascending: false });
-
-      if (tendersError) throw tendersError;
-
-      const [bidsResult] = await Promise.all([
-        getUserBids()
+      const [tendersResult, bidsResult, contractorTendersResult] = await Promise.all([
+        getTenders(),
+        getUserBids(),
+        getContractorTenders()
       ]);
 
-      setTenders(allTenders || []);
+      setTenders(tendersResult.data || []);
       if (bidsResult.data) setUserBids(bidsResult.data);
+      setContractorTenders(contractorTendersResult.data || []);
 
       // Calculate stats
-      const availableTenders = allTenders?.filter(t => t.status === 'available').length || 0;
+      const availableTenders = tendersResult.data?.filter(t => t.status === 'available').length || 0;
       const activeBids = bidsResult.data?.filter(b => b.status === 'submitted').length || 0;
       const wonContracts = bidsResult.data?.filter(b => b.status === 'accepted').length || 0;
+      const activeProjects = contractorTendersResult.data?.filter(t => t.workflow_stage === 'work_in_progress').length || 0;
+      const completedProjects = contractorTendersResult.data?.filter(t => t.workflow_stage === 'verified').length || 0;
       
       setStats({
         availableTenders,
         activeBids,
         wonContracts,
+        activeProjects,
+        completedProjects,
         totalEarnings: wonContracts * 15000, // Placeholder calculation
-        completionRate: wonContracts > 0 ? 94 : 0,
+        completionRate: wonContracts > 0 ? Math.round((completedProjects / wonContracts) * 100) : 0,
         avgBidValue: bidsResult.data?.length > 0 ? 
           bidsResult.data.reduce((sum, bid) => sum + (bid.amount || 0), 0) / bidsResult.data.length : 0
       });
@@ -165,7 +163,8 @@ export default function TenderDashboard() {
     { id: 'available', label: 'Available', count: stats.availableTenders },
     { id: 'bidded', label: 'My Bids', count: stats.activeBids },
     { id: 'won', label: 'Won', count: stats.wonContracts },
-    { id: 'completed', label: 'Completed', count: 0 },
+    { id: 'active', label: 'Active Projects', count: stats.activeProjects },
+    { id: 'completed', label: 'Completed', count: stats.completedProjects },
   ];
 
   const getCategoryColor = (category) => {
@@ -256,15 +255,137 @@ export default function TenderDashboard() {
     }
   };
 
+  const handleStartWork = async (tender) => {
+    try {
+      const { error } = await startWork(tender.id);
+      if (error) throw error;
+      
+      Alert.alert('Success', 'Work has been started. You can now submit progress updates.');
+      await loadDashboardData();
+    } catch (error) {
+      console.error('Error starting work:', error);
+      Alert.alert('Error', 'Failed to start work');
+    }
+  };
+
+  const handleSubmitCompletion = (tender) => {
+    setSelectedTenderForWork(tender);
+    setWorkData({
+      title: 'Work Completion Report',
+      description: '',
+      progressPercentage: 100,
+      images: []
+    });
+    setSelectedImages([]);
+    setShowWorkModal(true);
+  };
+
+  const pickImages = async () => {
+    const result = await ImagePicker.launchImageLibraryAsync({
+      mediaTypes: ImagePicker.MediaTypeOptions.Images,
+      allowsMultipleSelection: true,
+      aspect: [4, 3],
+      quality: 0.8,
+    });
+
+    if (!result.canceled) {
+      setSelectedImages([...selectedImages, ...result.assets]);
+    }
+  };
+
+  const takePhoto = async () => {
+    const result = await ImagePicker.launchCameraAsync({
+      aspect: [4, 3],
+      quality: 0.8,
+    });
+
+    if (!result.canceled) {
+      setSelectedImages([...selectedImages, ...result.assets]);
+    }
+  };
+
+  const removeImage = (index) => {
+    setSelectedImages(selectedImages.filter((_, i) => i !== index));
+  };
+
+  const submitWorkCompletion = async () => {
+    if (!workData.description) {
+      Alert.alert('Error', 'Please provide completion details');
+      return;
+    }
+
+    try {
+      setSubmittingWork(true);
+
+      // Upload images if any
+      let imageUrls = [];
+      if (selectedImages.length > 0) {
+        const imageUris = selectedImages.map(img => img.uri);
+        const uploadResult = await uploadMultipleImages(imageUris);
+        
+        if (uploadResult.successful.length > 0) {
+          imageUrls = uploadResult.successful.map(result => result.url);
+        }
+      }
+
+      // Create work progress entry
+      const progressData = {
+        tender_id: selectedTenderForWork.id,
+        progress_type: 'completion',
+        title: workData.title,
+        description: workData.description,
+        progress_percentage: 100,
+        images: imageUrls,
+        requires_verification: true,
+        status: 'submitted'
+      };
+
+      const { error } = await createWorkProgress(progressData);
+      if (error) throw error;
+
+      Alert.alert(
+        'Work Completion Submitted',
+        'Your work completion has been submitted for department review. You will be notified once it is verified.',
+        [
+          {
+            text: 'OK',
+            onPress: () => {
+              setShowWorkModal(false);
+              setSelectedTenderForWork(null);
+              loadDashboardData();
+            }
+          }
+        ]
+      );
+    } catch (error) {
+      console.error('Error submitting work completion:', error);
+      Alert.alert('Error', 'Failed to submit work completion: ' + error.message);
+    } finally {
+      setSubmittingWork(false);
+    }
+  };
+
   const filteredTenders = tenders.filter(tender => {
     switch (selectedFilter) {
       case 'available': return tender.status === 'available';
-      case 'bidded': return userBids.some(bid => bid.tender_id === tender.id);
-      case 'won': return userBids.some(bid => bid.tender_id === tender.id && bid.status === 'accepted');
-      case 'completed': return tender.status === 'completed';
+      case 'bidded': return userBids.some(bid => bid.tender_id === tender.id && bid.status === 'submitted');
+      case 'won': return contractorTenders.filter(t => t.my_bid?.[0]?.status === 'accepted');
+      case 'active': return contractorTenders.filter(t => t.workflow_stage === 'work_in_progress');
+      case 'completed': return contractorTenders.filter(t => t.workflow_stage === 'verified');
       default: return true;
     }
   });
+
+  // Use appropriate data source based on filter
+  const displayTenders = ['won', 'active', 'completed'].includes(selectedFilter) 
+    ? filteredTenders 
+    : tenders.filter(tender => {
+        switch (selectedFilter) {
+          case 'available': return tender.status === 'available';
+          case 'bidded': return userBids.some(bid => bid.tender_id === tender.id);
+          default: return true;
+        }
+      });
 
   const formatCurrency = (amount) => {
     return new Intl.NumberFormat('en-US', {
@@ -347,10 +468,18 @@ export default function TenderDashboard() {
           
           <View style={styles.statCard}>
             <View style={styles.statHeader}>
-              <TrendingUp size={20} color="#8B5CF6" />
-              <Text style={styles.statNumber}>{formatCurrency(stats.totalEarnings)}</Text>
+              <Activity size={20} color="#F59E0B" />
+              <Text style={styles.statNumber}>{stats.activeProjects}</Text>
             </View>
-            <Text style={styles.statLabel}>Total Earnings</Text>
+            <Text style={styles.statLabel}>Active Projects</Text>
+          </View>
+          
+          <View style={styles.statCard}>
+            <View style={styles.statHeader}>
+              <CheckCircle size={20} color="#8B5CF6" />
+              <Text style={styles.statNumber}>{stats.completedProjects}</Text>
+            </View>
+            <Text style={styles.statLabel}>Completed</Text>
           </View>
         </View>
       </View>
@@ -389,14 +518,14 @@ export default function TenderDashboard() {
       {/* Tenders List */}
       <View style={styles.tendersSection}>
         <View style={styles.tendersList}>
-          {filteredTenders.map((tender) => (
+          {displayTenders.map((tender) => (
             <View key={tender.id} style={styles.tenderCard}>
               {/* Tender Header */}
               <View style={styles.tenderHeader}>
                 <View style={styles.tenderStatus}>
                   {getStatusIcon(tender.status)}
                   <Text style={[styles.statusText, { color: getStatusColor(tender.status) }]}>
-                    {tender.status.toUpperCase()}
+                    {tender.workflow_stage?.replace('_', ' ').toUpperCase() || tender.status.toUpperCase()}
                   </Text>
                 </View>
                 <View style={styles.tenderMeta}>
@@ -479,17 +608,24 @@ export default function TenderDashboard() {
               </View>
 
               {/* My Bid Info */}
-              {userBids.find(bid => bid.tender_id === tender.id) && (
+              {(userBids.find(bid => bid.tender_id === tender.id) || tender.my_bid?.[0]) && (
                 <View style={styles.myBidInfo}>
-                  {(() => {
-                    const myBid = userBids.find(bid => bid.tender_id === tender.id);
-                    return (
                   <Text style={styles.myBidText}>
-                        Your bid: {formatCurrency(myBid.amount)}
-                        {myBid.status === 'accepted' && ` • Awarded`}
+                    Your bid: {formatCurrency((userBids.find(bid => bid.tender_id === tender.id) || tender.my_bid?.[0])?.amount)}
+                    {((userBids.find(bid => bid.tender_id === tender.id) || tender.my_bid?.[0])?.status === 'accepted') && ` • Awarded`}
                   </Text>
-                    );
-                  })()}
+                </View>
+              )}
+
+              {/* Work Progress Info */}
+              {tender.work_progress && tender.work_progress.length > 0 && (
+                <View style={styles.workProgressInfo}>
+                  <Text style={styles.workProgressTitle}>Latest Progress:</Text>
+                  {tender.work_progress.slice(0, 1).map(progress => (
+                    <Text key={progress.id} style={styles.workProgressText}>
+                      {progress.progress_type} - {progress.progress_percentage}% • {progress.status}
+                    </Text>
+                  ))}
                 </View>
               )}
 
@@ -505,15 +641,31 @@ export default function TenderDashboard() {
                   </TouchableOpacity>
                 )}
 
+                {/* Start Work Button */}
+                {tender.workflow_stage === 'awarded' && tender.awarded_contractor_id === user?.id && (
+                  <TouchableOpacity
+                    style={[styles.actionButton, styles.startWorkButton]}
+                    onPress={() => handleStartWork(tender)}
+                  >
+                    <Activity size={16} color="#FFFFFF" />
+                    <Text style={styles.startWorkButtonText}>Start Work</Text>
+                  </TouchableOpacity>
+                )}
+
+                {/* Submit Completion Button */}
+                {tender.workflow_stage === 'work_in_progress' && tender.awarded_contractor_id === user?.id && (
+                  <TouchableOpacity
+                    style={[styles.actionButton, styles.completeWorkButton]}
+                    onPress={() => handleSubmitCompletion(tender)}
+                  >
+                    <CheckCircle size={16} color="#FFFFFF" />
+                    <Text style={styles.completeWorkButtonText}>Submit Completion</Text>
+                  </TouchableOpacity>
+                )}
+
                 <TouchableOpacity style={[styles.actionButton, styles.detailsButton]}>
                   <Text style={styles.detailsButtonText}>View Details</Text>
                 </TouchableOpacity>
-
-                {userBids.find(bid => bid.tender_id === tender.id && bid.status === 'accepted') && (
-                  <TouchableOpacity style={[styles.actionButton, styles.startButton]}>
-                    <Text style={styles.startButtonText}>Start Work</Text>
-                  </TouchableOpacity>
-                )}
               </View>
             </View>
           ))}
@@ -569,6 +721,95 @@ export default function TenderDashboard() {
           </View>
         </View>
       )}
+
+      {/* Work Completion Modal */}
+      <Modal visible={showWorkModal} transparent animationType="slide">
+        <View style={styles.modalOverlay}>
+          <View style={styles.modalContent}>
+            <View style={styles.modalHeader}>
+              <Text style={styles.modalTitle}>Submit Work Completion</Text>
+              <TouchableOpacity onPress={() => setShowWorkModal(false)}>
+                <X size={24} color="#6B7280" />
+              </TouchableOpacity>
+            </View>
+
+            <ScrollView style={styles.modalForm}>
+              <View style={styles.inputGroup}>
+                <Text style={styles.inputLabel}>Completion Title</Text>
+                <TextInput
+                  style={styles.input}
+                  value={workData.title}
+                  onChangeText={(text) => setWorkData({...workData, title: text})}
+                  placeholder="Work Completion Report"
+                />
+              </View>
+
+              <View style={styles.inputGroup}>
+                <Text style={styles.inputLabel}>Completion Details *</Text>
+                <TextInput
+                  style={[styles.input, styles.textArea]}
+                  value={workData.description}
+                  onChangeText={(text) => setWorkData({...workData, description: text})}
+                  placeholder="Describe the completed work, materials used, quality standards met, and any additional notes..."
+                  multiline
+                  numberOfLines={4}
+                />
+              </View>
+
+              {/* Photo Upload */}
+              <View style={styles.inputGroup}>
+                <Text style={styles.inputLabel}>Completion Photos</Text>
+                <Text style={styles.mediaHint}>Upload photos showing the completed work</Text>
+                <View style={styles.mediaContainer}>
+                  <TouchableOpacity style={styles.mediaButton} onPress={takePhoto}>
+                    <Camera size={20} color="#1E40AF" />
+                    <Text style={styles.mediaButtonText}>Take Photo</Text>
+                  </TouchableOpacity>
+                  <TouchableOpacity style={styles.mediaButton} onPress={pickImages}>
+                    <Upload size={20} color="#1E40AF" />
+                    <Text style={styles.mediaButtonText}>Upload Photos</Text>
+                  </TouchableOpacity>
+                </View>
+
+                {selectedImages.length > 0 && (
+                  <ScrollView horizontal style={styles.imagePreview} showsHorizontalScrollIndicator={false}>
+                    {selectedImages.map((image, index) => (
+                      <View key={index} style={styles.imageContainer}>
+                        <Image source={{ uri: image.uri }} style={styles.previewImage} />
+                        <TouchableOpacity
+                          style={styles.removeImageButton}
+                          onPress={() => removeImage(index)}
+                        >
+                          <X size={16} color="#FFFFFF" />
+                        </TouchableOpacity>
+                      </View>
+                    ))}
+                  </ScrollView>
+                )}
+              </View>
+            </ScrollView>
+
+            <View style={styles.modalActions}>
+              <TouchableOpacity
+                style={styles.cancelButton}
+                onPress={() => setShowWorkModal(false)}
+              >
+                <Text style={styles.cancelButtonText}>Cancel</Text>
+              </TouchableOpacity>
+              <TouchableOpacity
+                style={[styles.submitButton, submittingWork && styles.submitButtonDisabled]}
+                onPress={submitWorkCompletion}
+                disabled={submittingWork}
+              >
+                <CheckCircle size={16} color="#FFFFFF" />
+                <Text style={styles.submitButtonText}>
+                  {submittingWork ? 'Submitting...' : 'Submit Completion'}
+                </Text>
+              </TouchableOpacity>
+            </View>
+          </View>
+        </View>
+      </Modal>
     </ScrollView>
   );
 }
@@ -897,6 +1138,101 @@ const styles = StyleSheet.create({
     fontSize: 14,
     fontWeight: '600',
   },
+  startWorkButton: {
+    backgroundColor: '#F59E0B',
+  },
+  startWorkButtonText: {
+    color: '#FFFFFF',
+    fontSize: 14,
+    fontWeight: '600',
+  },
+  completeWorkButton: {
+    backgroundColor: '#10B981',
+  },
+  completeWorkButtonText: {
+    color: '#FFFFFF',
+    fontSize: 14,
+    fontWeight: '600',
+  },
+  workProgressInfo: {
+    backgroundColor: '#E0F2FE',
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    borderRadius: 8,
+    marginBottom: 16,
+  },
+  workProgressTitle: {
+    fontSize: 12,
+    fontWeight: '600',
+    color: '#0369A1',
+    marginBottom: 4,
+  },
+  workProgressText: {
+    fontSize: 12,
+    color: '#0369A1',
+  },
+  modalForm: {
+    maxHeight: 400,
+    paddingHorizontal: 20,
+  },
+  inputGroup: {
+    marginBottom: 16,
+  },
+  inputLabel: {
+    fontSize: 14,
+    fontWeight: '600',
+    color: '#111827',
+    marginBottom: 6,
+  },
+  mediaHint: {
+    fontSize: 12,
+    color: '#6B7280',
+    marginBottom: 12,
+  },
+  mediaContainer: {
+    flexDirection: 'row',
+    gap: 12,
+    marginBottom: 16,
+  },
+  mediaButton: {
+    flex: 1,
+    backgroundColor: '#F0F9FF',
+    borderWidth: 2,
+    borderColor: '#1E40AF',
+    borderStyle: 'dashed',
+    borderRadius: 12,
+    paddingVertical: 16,
+    alignItems: 'center',
+    gap: 6,
+  },
+  mediaButtonText: {
+    fontSize: 12,
+    fontWeight: '500',
+    color: '#1E40AF',
+  },
+  imagePreview: {
+    marginTop: 12,
+  },
+  imageContainer: {
+    position: 'relative',
+    marginRight: 12,
+  },
+  previewImage: {
+    width: 80,
+    height: 80,
+    borderRadius: 8,
+  },
+  removeImageButton: {
+    position: 'absolute',
+    top: -8,
+    right: -8,
+    backgroundColor: '#EF4444',
+    borderRadius: 12,
+    width: 24,
+    height: 24,
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
   modalOverlay: {
     position: 'absolute',
     top: 0,
@@ -914,12 +1250,18 @@ const styles = StyleSheet.create({
     padding: 24,
     width: '100%',
     maxWidth: 400,
+    maxHeight: '90%',
+  },
+  modalHeader: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginBottom: 20,
   },
   modalTitle: {
-    fontSize: 20,
+    fontSize: 18,
     fontWeight: '700',
     color: '#111827',
-    marginBottom: 4,
   },
   modalSubtitle: {
     fontSize: 14,
@@ -928,14 +1270,6 @@ const styles = StyleSheet.create({
   },
   bidForm: {
     gap: 16,
-  },
-  inputGroup: {
-    gap: 6,
-  },
-  inputLabel: {
-    fontSize: 14,
-    fontWeight: '600',
-    color: '#111827',
   },
   input: {
     backgroundColor: '#F9FAFB',
@@ -955,6 +1289,8 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     gap: 12,
     marginTop: 24,
+    paddingHorizontal: 20,
+    paddingBottom: 20,
   },
   modalButton: {
     flex: 1,
@@ -963,6 +1299,10 @@ const styles = StyleSheet.create({
     alignItems: 'center',
   },
   cancelButton: {
+    flex: 1,
+    paddingVertical: 12,
+    borderRadius: 8,
+    alignItems: 'center',
     backgroundColor: '#E5E7EB',
   },
   cancelButtonText: {
@@ -971,7 +1311,17 @@ const styles = StyleSheet.create({
     fontWeight: '600',
   },
   submitButton: {
+    flex: 1,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingVertical: 12,
+    borderRadius: 8,
+    gap: 6,
     backgroundColor: '#1E40AF',
+  },
+  submitButtonDisabled: {
+    opacity: 0.6,
   },
   submitButtonText: {
     color: '#FFFFFF',

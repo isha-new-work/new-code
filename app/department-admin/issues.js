@@ -13,7 +13,8 @@ import {
   getUserProfile,
   getBidsByTender,
   acceptBid,
-  rejectBid
+  rejectBid,
+  updateIssue
 } from '../../lib/supabase';
 
 export default function DepartmentAdminIssues() {
@@ -133,10 +134,14 @@ export default function DepartmentAdminIssues() {
       if (error) throw error;
 
       // Update issue workflow stage
-      const { error: updateError } = await updateIssue(selectedIssue.id, {
+      const { error: updateError } = await supabase
+        .from('issues')
+        .update({
         workflow_stage: 'contractor_assigned',
-        status: 'in_progress'
-      });
+        status: 'in_progress',
+        updated_at: new Date().toISOString()
+        })
+        .eq('id', selectedIssue.id);
 
       if (updateError) console.error('Error updating issue workflow:', updateError);
 
@@ -416,7 +421,7 @@ export default function DepartmentAdminIssues() {
                   <View style={styles.tenderStatus}>
                     <FileText size={14} color="#F59E0B" />
                     <Text style={styles.tenderStatusText}>
-                      Tender created • {issue.tender?.bids?.length || 0} bids received
+                      Tender: {issue.workflow_stage?.replace('_', ' ')} • {issue.tender?.bids?.length || 0} bids
                     </Text>
                   </View>
                 )}

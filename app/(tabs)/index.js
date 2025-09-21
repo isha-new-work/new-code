@@ -157,7 +157,13 @@ export default function HomeScreen() {
       if (userType === 'tender') {
         const { data: bids, error: bidsError } = await getUserBids();
         if (!bidsError) {
-          setStats(prev => ({ ...prev, myBids: bids?.length || 0 }));
+          const activeBids = bids?.filter(b => b.status === 'submitted').length || 0;
+          const wonBids = bids?.filter(b => b.status === 'accepted').length || 0;
+          setStats(prev => ({ 
+            ...prev, 
+            myBids: activeBids,
+            wonContracts: wonBids
+          }));
         }
       }
     } catch (error) {
@@ -201,8 +207,22 @@ export default function HomeScreen() {
   const quickStatsData = [
     { id: 'issues', title: 'My Issues', value: stats.myIssues, icon: MapPin, color: '#EF4444', change: '+2' },
     { id: 'resolved', title: 'Resolved', value: stats.resolvedIssues, icon: CheckCircle, color: '#10B981', change: '+12' },
-    { id: 'community', title: 'Posts', value: stats.communityPosts, icon: MessageSquare, color: '#8B5CF6', change: '+5' },
-    { id: 'rank', title: 'Rank', value: stats.rank, icon: Trophy, color: '#F59E0B', change: '+3' },
+    { 
+      id: 'community', 
+      title: profile?.user_type === 'tender' ? 'Won Contracts' : 'Posts', 
+      value: profile?.user_type === 'tender' ? stats.wonContracts : stats.communityPosts, 
+      icon: profile?.user_type === 'tender' ? Trophy : MessageSquare, 
+      color: '#8B5CF6', 
+      change: '+5' 
+    },
+    { 
+      id: 'rank', 
+      title: profile?.user_type === 'tender' ? 'Active Bids' : 'Rank', 
+      value: profile?.user_type === 'tender' ? stats.myBids : stats.rank, 
+      icon: profile?.user_type === 'tender' ? Activity : Trophy, 
+      color: '#F59E0B', 
+      change: '+3' 
+    },
   ];
 
   const onRefresh = async () => { setRefreshing(true); await loadData(); setRefreshing(false); };

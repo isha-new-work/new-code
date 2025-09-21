@@ -10,7 +10,8 @@ import {
   getIssuesByWorkflowStage,
   createTender,
   assignTenderToContractor,
-  getWorkProgress,
+  getWorkProgressByTender,
+  verifyWorkProgress,
   updateIssue,
   subscribeToIssueUpdates,
   subscribeToTenderUpdates,
@@ -70,6 +71,11 @@ export default function DepartmentAdminDashboard() {
   const [selectedImages, setSelectedImages] = useState([]);
   const [loadingBids, setLoadingBids] = useState(false);
   const [processingBid, setProcessingBid] = useState(false);
+  const [showWorkProgressModal, setShowWorkProgressModal] = useState(false);
+  const [selectedTenderProgress, setSelectedTenderProgress] = useState(null);
+  const [workProgressList, setWorkProgressList] = useState([]);
+  const [verificationNotes, setVerificationNotes] = useState('');
+  const [verifying, setVerifying] = useState(false);
 
   useEffect(() => {
     loadDashboardData();
@@ -109,6 +115,7 @@ export default function DepartmentAdminDashboard() {
       const completedProjects = tenders.filter(t => t.status === 'completed').length;
       const tendersCreated = tenders.length;
       const pendingBids = tenders.reduce((sum, tender) => sum + (tender.bids?.filter(b => b.status === 'submitted').length || 0), 0);
+      const workCompletionsToReview = tenders.filter(t => t.workflow_stage === 'work_completed').length;
 
       setStats({
         assignedIssues,
@@ -117,7 +124,8 @@ export default function DepartmentAdminDashboard() {
         completedProjects,
         avgCompletionTime: calculateAvgCompletionTime(tenders),
         tendersCreated,
-        pendingBids
+        pendingBids,
+        workCompletionsToReview
       });
 
     } catch (error) {
@@ -300,6 +308,41 @@ export default function DepartmentAdminDashboard() {
         }
       ]
     );
+  };
+
+  const handleViewWorkProgress = async (tender) => {
+    try {
+      setSelectedTenderProgress(tender);
+      const { data, error } = await getWorkProgressByTender(tender.id);
+      if (error) throw error;
+      
+      setWorkProgressList(data || []);
+      setShowWorkProgressModal(true);
+    } catch (error) {
+      console.error('Error loading work progress:', error);
+      Alert.alert('Error', 'Failed to load work progress');
+    }
+  };
+
+  const handleVerifyWork = async (progressId, approved) => {
+    try {
+      setVerifying(true);
+      const { error } = await verifyWorkProgress(progressId, verificationNotes, approved);
+      if (error) throw error;
+      
+      Alert.alert(
+        'Success', 
+        approved ? 'Work has been verified and approved' : 'Work verification rejected'
+      );
+      setShowWorkProgressModal(false);
+      setVerificationNotes('');
+      await loadDashboardData();
+    } catch (error) {
+      console.error('Error verifying work:', error);
+      Alert.alert('Error', 'Failed to verify work');
+    } finally {
+      setVerifying(false);
+    }
   };
 
   const handleWorkCompleted = (assignment) => {
@@ -636,6 +679,19 @@ export default function DepartmentAdminDashboard() {
                   </Text>
                 </TouchableOpacity>
 
+                {/* View Work Progress Button */}
+                {(tender.workflow_stage === 'work_in_progress' || tender.workflow_stage === 'work_completed') && (
+                  <TouchableOpacity
+                    style={styles.workProgressButton}
+                    onPress={() => handleViewWorkProgress(tender)}
+                  >
+                    <Activity size={16} color="#FFFFFF" />
+                    <Text style={styles.workProgressButtonText}>
+                      View Progress ({tender.work_progress?.length || 0})
+                    </Text>
+                  </TouchableOpacity>
+                )}
+
                 {tender.status === 'awarded' && (
                   <View style={styles.awardedInfo}>
                     <Award size={14} color="#10B981" />
@@ -868,6 +924,130 @@ export default function DepartmentAdminDashboard() {
                         <View style={styles.acceptedInfo}>
                           <Award size={14} color="#10B981" />
                           <Text style={styles.acceptedText}>Bid Accepted</Text>
+                        </View>
+                      )}
+                    </View>
+                  ))}
+                </View>
+              )}
+            </ScrollView>
+          </View>
+        </View>
+      </Modal>
+
+      {/* Work Progress Modal */}
+      <Modal visible={showWorkProgressModal} transparent animationType="slide">
+        <View style={styles.modalOverlay}>
+          <View style={styles.modalContent}>
+            <View style={styles.modalHeader}>
+              <Text style={styles.modalTitle}>Work Progress Review</Text>
+              <TouchableOpacity onPress={() => setShowWorkProgressModal(false)}>
+                <X size={24} color="#6B7280" />
+              </TouchableOpacity>
+            </View>
+
+            {selectedTenderProgress && (
+              <View style={styles.tenderInfo}>
+                <Text style={styles.tenderInfoTitle}>{selectedTenderProgress.title}</Text>
+                <Text style={styles.tenderInfoContractor}>
+                  Contractor: {selectedTenderProgress.awarded_contractor?.full_name}
+                </Text>
+              </View>
+            )}
+
+            <ScrollView style={styles.progressContainer}>
+              {workProgressList.length === 0 ? (
+                <View style={styles.emptyState}>
+                  <Activity size={32} color="#9CA3AF" />
+                  <Text style={styles.emptyText}>No work progress submitted yet</Text>
+                </View>
+              ) : (
+                <View style={styles.progressList}>
+                  {workProgressList.map((progress) => (
+                    <View key={progress.id} style={styles.progressCard}>
+                      {/* Progress Header */}
+                      <View style={styles.progressHeader}>
+                        <View style={styles.progressMeta}>
+                          <Text style={styles.progressType}>
+                            {progress.progress_type.charAt(0).toUpperCase() + progress.progress_type.slice(1)}
+                          </Text>
+                          <View style={[styles.progressStatusBadge, { backgroundColor: getStatusColor(progress.status) + '20' }]}>
+                            <Text style={[styles.progressStatusText, { color: getStatusColor(progress.status) }]}>
+                              {progress.status.charAt(0).toUpperCase() + progress.status.slice(1)}
+                            </Text>
+                          </View>
+                        </View>
+                        <Text style={styles.progressDate}>{formatDate(progress.created_at)}</Text>
+                      </View>
+
+                      <Text style={styles.progressTitle}>{progress.title}</Text>
+                      <Text style={styles.progressDescription}>{progress.description}</Text>
+
+                      {progress.progress_percentage !== null && (
+                        <View style={styles.progressBar}>
+                          <Text style={styles.progressPercentage}>{progress.progress_percentage}% Complete</Text>
+                          <View style={styles.progressBarContainer}>
+                            <View 
+                              style={[
+                                styles.progressBarFill, 
+                                { width: `${progress.progress_percentage}%` }
+                              ]} 
+                            />
+                          </View>
+                        </View>
+                      )}
+
+                      {/* Images */}
+                      {progress.images && progress.images.length > 0 && (
+                        <ScrollView horizontal style={styles.progressImages} showsHorizontalScrollIndicator={false}>
+                          {progress.images.map((imageUrl, index) => (
+                            <Image key={index} source={{ uri: imageUrl }} style={styles.progressImage} />
+                          ))}
+                        </ScrollView>
+                      )}
+
+                      {/* Verification Section */}
+                      {progress.progress_type === 'completion' && progress.status === 'submitted' && (
+                        <View style={styles.verificationSection}>
+                          <Text style={styles.verificationTitle}>Department Verification</Text>
+                          <TextInput
+                            style={styles.verificationInput}
+                            placeholder="Add verification notes..."
+                            value={verificationNotes}
+                            onChangeText={setVerificationNotes}
+                            multiline
+                            numberOfLines={3}
+                          />
+                          <View style={styles.verificationActions}>
+                            <TouchableOpacity
+                              style={[styles.verificationButton, styles.rejectVerificationButton]}
+                              onPress={() => handleVerifyWork(progress.id, false)}
+                              disabled={verifying}
+                            >
+                              <X size={14} color="#FFFFFF" />
+                              <Text style={styles.verificationButtonText}>Reject</Text>
+                            </TouchableOpacity>
+                            <TouchableOpacity
+                              style={[styles.verificationButton, styles.approveVerificationButton]}
+                              onPress={() => handleVerifyWork(progress.id, true)}
+                              disabled={verifying}
+                            >
+                              <CheckCircle size={14} color="#FFFFFF" />
+                              <Text style={styles.verificationButtonText}>
+                                {verifying ? 'Verifying...' : 'Approve & Complete'}
+                              </Text>
+                            </TouchableOpacity>
+                          </View>
+                        </View>
+                      )}
+
+                      {/* Verification Status */}
+                      {progress.verified_at && (
+                        <View style={styles.verifiedInfo}>
+                          <CheckCircle size={14} color="#10B981" />
+                          <Text style={styles.verifiedText}>
+                            Verified by {progress.verified_by_profile?.full_name} on {formatDate(progress.verified_at)}
+                          </Text>
                         </View>
                       )}
                     </View>
@@ -1549,6 +1729,171 @@ const styles = StyleSheet.create({
     fontSize: 12,
     color: '#10B981',
     fontWeight: '600',
+  },
+  workProgressButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: '#8B5CF6',
+    paddingVertical: 10,
+    borderRadius: 8,
+    gap: 6,
+    marginBottom: 8,
+  },
+  workProgressButtonText: {
+    color: '#FFFFFF',
+    fontSize: 14,
+    fontWeight: '600',
+  },
+  tenderInfoContractor: {
+    fontSize: 14,
+    color: '#1E40AF',
+  },
+  progressContainer: {
+    flex: 1,
+    paddingHorizontal: 20,
+  },
+  progressList: {
+    gap: 16,
+  },
+  progressCard: {
+    backgroundColor: '#F9FAFB',
+    borderRadius: 12,
+    padding: 16,
+    borderWidth: 1,
+    borderColor: '#E5E7EB',
+  },
+  progressHeader: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'flex-start',
+    marginBottom: 12,
+  },
+  progressMeta: {
+    flexDirection: 'row',
+    gap: 8,
+  },
+  progressType: {
+    fontSize: 12,
+    fontWeight: '600',
+    color: '#8B5CF6',
+  },
+  progressStatusBadge: {
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+    borderRadius: 8,
+  },
+  progressStatusText: {
+    fontSize: 12,
+    fontWeight: '600',
+  },
+  progressDate: {
+    fontSize: 12,
+    color: '#9CA3AF',
+  },
+  progressTitle: {
+    fontSize: 16,
+    fontWeight: '600',
+    color: '#111827',
+    marginBottom: 8,
+  },
+  progressDescription: {
+    fontSize: 14,
+    color: '#6B7280',
+    lineHeight: 20,
+    marginBottom: 12,
+  },
+  progressBar: {
+    marginBottom: 12,
+  },
+  progressPercentage: {
+    fontSize: 12,
+    fontWeight: '600',
+    color: '#111827',
+    marginBottom: 6,
+  },
+  progressBarContainer: {
+    height: 8,
+    backgroundColor: '#E5E7EB',
+    borderRadius: 4,
+    overflow: 'hidden',
+  },
+  progressBarFill: {
+    height: '100%',
+    backgroundColor: '#10B981',
+    borderRadius: 4,
+  },
+  progressImages: {
+    marginBottom: 12,
+  },
+  progressImage: {
+    width: 80,
+    height: 80,
+    borderRadius: 8,
+    marginRight: 8,
+  },
+  verificationSection: {
+    backgroundColor: '#F0F9FF',
+    padding: 16,
+    borderRadius: 12,
+    marginTop: 12,
+  },
+  verificationTitle: {
+    fontSize: 14,
+    fontWeight: '600',
+    color: '#1E40AF',
+    marginBottom: 8,
+  },
+  verificationInput: {
+    backgroundColor: '#FFFFFF',
+    borderWidth: 1,
+    borderColor: '#BFDBFE',
+    borderRadius: 8,
+    padding: 12,
+    fontSize: 14,
+    color: '#111827',
+    textAlignVertical: 'top',
+    minHeight: 80,
+    marginBottom: 12,
+  },
+  verificationActions: {
+    flexDirection: 'row',
+    gap: 8,
+  },
+  verificationButton: {
+    flex: 1,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingVertical: 10,
+    borderRadius: 8,
+    gap: 6,
+  },
+  rejectVerificationButton: {
+    backgroundColor: '#EF4444',
+  },
+  approveVerificationButton: {
+    backgroundColor: '#10B981',
+  },
+  verificationButtonText: {
+    color: '#FFFFFF',
+    fontSize: 14,
+    fontWeight: '600',
+  },
+  verifiedInfo: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: '#F0FDF4',
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    borderRadius: 8,
+    gap: 6,
+    marginTop: 12,
+  },
+  verifiedText: {
+    fontSize: 12,
+    color: '#10B981',
+    fontWeight: '500',
   },
   modalActions: {
     flexDirection: 'row',
